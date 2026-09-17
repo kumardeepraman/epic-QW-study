@@ -124,6 +124,30 @@ static Ref_t createDetector(Detector& desc, xml::Handle_t handle, SensitiveDetec
   auto sensorboxRmin   = desc.constant<double>("DRICH_sensorbox_rmin");
   auto sensorboxRmax   = desc.constant<double>("DRICH_sensorbox_rmax");
   auto sensorboxDphi   = desc.constant<double>("DRICH_sensorbox_dphi");
+  
+  // -quartz window added by DS, same shape as sensor box but smaller in length and different material and displaced
+  auto quartzElem         = detElem.child(_Unicode(quartzwindow));
+  auto quartzwinThickness = quartzElem.attr<double>("thickness");
+  auto quartzwinRmin      = quartzElem.attr<double>("rmin");
+  auto quartzwinRmax      = quartzElem.attr<double>("rmax");
+  auto quartzwinZmin      = quartzElem.attr<double>("zmin");
+  auto quartzwinZmax      = quartzElem.attr<double>("zmax");
+  auto quartzwinDphi      = quartzElem.attr<double>("phiw");
+  auto quartzwinShift     = quartzElem.attr<double>("shift");
+  auto quartzwinMat       = desc.material(quartzElem.attr<std::string>(_Unicode(material)));
+  auto quartzwinVis       = desc.visAttributes(quartzElem.attr<std::string>(_Unicode(vis)));
+
+  std::cout<<"=== Quartz Window ==="<<std::endl;
+  std::cout<<"Thickness: "<<quartzwinThickness<<std::endl;
+  std::cout<<"Rmin: "<<quartzwinRmin<<std::endl;
+  std::cout<<"Rmax: "<<quartzwinRmax<<std::endl;
+  std::cout<<"Zmin: "<<quartzwinZmin<<std::endl;
+  std::cout<<"Zmax: "<<quartzwinZmax<<std::endl;
+  std::cout<<"Dphi: "<<quartzwinDphi<<std::endl;
+  std::cout<<"Shift: "<<quartzwinShift<<std::endl;
+  std::cout<<"Material: "<<quartzwinMat->GetName()<<std::endl;
+  std::cout<<std::endl;
+  
   // - sensor photosensitive surface (pss)
   auto pssElem      = detElem.child(_Unicode(sensors)).child(_Unicode(pss));
   auto pssMat       = desc.material(pssElem.attr<std::string>(_Unicode(material)));
@@ -462,6 +486,68 @@ static Ref_t createDetector(Detector& desc, xml::Handle_t handle, SensitiveDetec
   Volume filterVol(detName + "_filter", filterSolid, filterMat);
   airgapVol.setVisAttributes(airgapVis);
   filterVol.setVisAttributes(filterVis);
+  
+        // quartz window placement
+  float qw_slope    =  (quartzwinRmax - quartzwinRmin)/(quartzwinZmax-quartzwinZmin);
+  float qw_intercpt =   quartzwinRmax - qw_slope*quartzwinZmax;
+  double qw_angle    =   (atan(qw_slope)-(M_PI/2));
+  double qw_zpos     = -((qw_intercpt/qw_slope) + vesselPos.z()) + quartzwinThickness/2 + quartzwinShift;
+  // rmax should be increased so that the top edge matches at the right point (2545,1790)
+  float quartzwinRmax2 = (quartzwinRmax) / cos(qw_angle);
+ //float quartzwinRmax2 = quartzwinRmax * cos(qw_angle);
+  float quartzwinRmin2 = (quartzwinRmax2-quartzwinRmax)+(quartzwinRmin);
+ //float quartzwinRmin2 = quartzwinRmin / cos(qw_angle); //RJ
+
+ 
+  RotationY tiltRotation(qw_angle);
+  
+
+  std::cout<<"Quartz Window Rmin: "<<quartzwinRmin<<std::endl;
+  std::cout<<"Quartz Window Rmax: "<<quartzwinRmax<<std::endl;
+  std::cout<<"Quartz Window Rmin2: "<<quartzwinRmin2<<std::endl;
+  std::cout<<"Quartz Window Rmax2: "<<quartzwinRmax2<<std::endl;
+  std::cout<<"Quartz Window Zpos: "<<qw_zpos<<std::endl;
+  std::cout<<"Quartz Window Angle: "<<qw_angle<<std::endl;
+  std::cout<<"Quartz Window Slope: "<<qw_slope<<std::endl;
+  std::cout<<"Quartz Window Intercept: "<<qw_intercpt<<std::endl;
+  std::cout<<"Vessel Zpos "<<vesselPos.z()<<std::endl;
+ 
+  for (int isec = 0; isec < nSectors; isec++) {
+    Tube quartzTube(quartzwinRmin2, quartzwinRmax2, (quartzwinThickness/2.), -quartzwinDphi / 2., quartzwinDphi / 2.);
+
+    std::string secName = "sec" + std::to_string(isec);
+    Volume quartzVol(detName + "_quartzwin_"+secName, quartzTube, quartzwinMat);//"_quartz_" + secName
+    //quartzVol.setSensitiveDetector(sens); //DK
+    quartzVol.setVisAttributes(quartzwinVis);
+    // positioning:
+    // the origin is currently at (0,0,2680 mm), given by vesselPos
+    // First: each quartz window is rotated about the z axis by the same amount as the sensor box
+    // Second: Each quartz window is placed such that it is tangential to the central part of the sensor
+    // this requires a rotation about the y axis
+    // Note that all rotations are about the origin and therefore the quartz window has to be shifted back by a suitable amount
+    // It also requires a shifting along y and z due to the rotation
+
+    RotationZ sectorRotation((isec + 0.5) * 2 * M_PI / nSectors); // apply same rotation as sensorbox
+    auto quartzPlacement = Translation3D(0., 0, qw_zpos)* RotationZ((isec + 0.5) * 2 * M_PI / nSectors)*tiltRotation ; //*tiltRotation// re-center to originFront
+
+    auto quartzPV = gasvolVol.placeVolume(quartzVol, quartzPlacement);
+    quartzPV.addPhysVolID("sector", isec)
+    .addPhysVolID("pdu", 999).addPhysVolID("sipm",999); // Unique identifier for quartz window
+    
+    auto sensorID = encodeSensorID(quartzPV.volIDs());
+    DetElement quartzDE(det, "quartz_de"+secName, sensorID);
+    quartzDE.setPlacement(quartzPV);
+    
+    // Attach the optical surface for Fresnel reflection at air–quartz boundary:
+//auto quartzSurf = surfMgr.opticalSurface("Quartz_Surface");
+//SkinSurface quartzSkin(desc,
+                  //  quartzDE,
+      //               "quartzwindow_skin_" + secName,
+    //                  quartzSurf,
+  //                     quartzVol);
+//quartzSkin.isValid(); 
+  }
+  
 
   // airgap and filter placement and surface properties
   if (!debugOptics) {
@@ -489,6 +575,7 @@ static Ref_t createDetector(Detector& desc, xml::Handle_t handle, SensitiveDetec
     // radiator z-positions (w.r.t. IP); only needed downstream if !debugOptics
     double aerogelZpos = vesselPos.z() + aerogelPV.position().z();
     double filterZpos  = vesselPos.z() + filterPV.position().z();
+    double quartzwinZpos = vesselPos.z() + qw_zpos;
 #endif
 
 #ifdef WITH_IRT1_SUPPORT
@@ -496,6 +583,7 @@ static Ref_t createDetector(Detector& desc, xml::Handle_t handle, SensitiveDetec
     desc.add(Constant("DRICH_aerogel_zpos", std::to_string(aerogelZpos)));
     desc.add(Constant("DRICH_airgap_zpos", std::to_string(airgapZpos)));
     desc.add(Constant("DRICH_filter_zpos", std::to_string(filterZpos)));
+    desc.add(Constant("DRICH_QW_zpos", std::to_string(quartzwinZpos))); //RJ
 #endif
 
 #ifdef WITH_IRT2_SUPPORT
@@ -540,6 +628,7 @@ static Ref_t createDetector(Detector& desc, xml::Handle_t handle, SensitiveDetec
   desc.add(Constant("DRICH_airgap_material", airgapMat.ptr()->GetName(), "string"));
   desc.add(Constant("DRICH_filter_material", filterMat.ptr()->GetName(), "string"));
   desc.add(Constant("DRICH_gasvol_material", gasvolMat.ptr()->GetName(), "string"));
+  desc.add(Constant("DRICH_quartzwindow_material", quartzwinMat.ptr()->GetName(),  "string"));  //RJ
 #endif
 #ifdef WITH_IRT2_SUPPORT
   // [0,0]: have neither access to G4VSolid nor to G4Material; IRT code does not care; fine;
